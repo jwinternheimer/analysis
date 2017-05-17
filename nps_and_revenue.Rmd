@@ -1,0 +1,77 @@
+---
+title: "NPS and Revenue"
+output: github_document
+---
+
+## Motivation
+The goal of this small analysis is to determine if the average revenue per user (ARPU) is significanly different for users that responded to Buffer's NPS survey with a 5, relative to those that responded with a 4 or 6. 
+
+The sample sizes are quite small, so I don't anticipate a statistically significantly different average for these scores, but let's see!
+
+## Conclusions
+The ARPU of users that responded with a 6 is not significantly different than that of users that responded with a 5, however the ARPU of users that responded with a 4 is signfincantly different than that of users that responded with a 5! 
+
+## Data collection
+The responses can be viewed in [**this Look**](https://looker.buffer.com/x/dwzYVGs). I simply downloaded a CSV since the dataset is small.
+
+```{r include = F}
+library(buffer); library(dplyr); library(ggplot2)
+```
+
+```{r}
+# Read CSV
+nps <- read.csv('~/Downloads/nps.csv', header = T)
+
+# Change column names
+colnames(nps) <- c('user_id', 'score', 'total_revenue')
+```
+
+## Exploration
+Let's summarise the data and visualize the distribution of the revenue contributed by these users.
+
+```{r}
+# Summarize the dataset
+summary(nps)
+```
+
+There are 171 users in our dataset that gave Buffer a score of 4, 5, or 6. The minimum revenue amount contributed by these users is 20, the median is 950, and the max is 8367. Let's visualize the distribution of revenue amounts.
+
+```{r}
+# Plot revenue distributions
+ggplot(nps, aes(x = total_revenue, color = as.factor(score))) +
+  geom_density() +
+  labs(x = "", y = "Density", color = "NPS Score", title = "Revenue Contribution")
+```
+
+Now let's plot the cumulative distribution function (CDF) for each segment of user.
+
+```{r}
+# Plot CDF
+ggplot(nps, aes(x = total_revenue, color = as.factor(score))) +
+  stat_ecdf() +
+  labs(x = "", y = "Percent of Users", color = "NPS Score", title = "Revenue Contribution")
+```
+
+There is a slight suggestion that users that gave a score of 4 contribute less revenue.
+
+## T-test
+Let's use a t-test to determine if the samples have significantly different means. We'll compare 4's and 5's first.
+
+```{r}
+# Get samples
+fours <- filter(nps, score == 4)
+fives <- filter(nps, score == 5)
+sixes <- filter(nps, score == 6)
+
+# Run t-test
+t.test(fours$total_revenue, fives$total_revenue)
+```
+
+Interesting! Even with the small sample, the ARPU is significantly different for users that responded with a 4 than a 5! Let's test the 5's and 6's.
+
+```{r}
+# Run t-test
+t.test(fives$total_revenue, sixes$total_revenue)
+```
+
+The ARPU of users that responded with a 6 is not significantly different than that of users that responded with a 5. :) 
