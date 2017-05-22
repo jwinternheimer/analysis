@@ -79,7 +79,7 @@ Alright! Let's summarize and plot the model.
 library(survminer)
 
 # Visualize with survminer
-ggsurvplot(fit, data = subs, risk.table = "percentage", risk.table.title = "Percent Left",
+ggsurvplot(fit, data = subs, risk.table = "percentage", risk.table.title = "Percent Remaining",
            break.x.by = 60, xlim = c(0, 365))
 ```
 
@@ -93,7 +93,7 @@ Let's look at the plot a bit more closely, zooming in on the first 6 months.
 
 ``` r
 # Build survival plot of first 6 months
-ggsurvplot(fit, data = subs, risk.table = "percentage", risk.table.title = "Percent Left",
+ggsurvplot(fit, data = subs, risk.table = "percentage", risk.table.title = "Percent Remaining",
            break.x.by = 30, xlim = c(0, 180))
 ```
 
@@ -122,10 +122,12 @@ subs$survival <- Surv(subs$length, subs$churned)
 fit <- survfit(survival ~ gateway, data = subs)
 
 # Plot the survival curves
-ggsurvplot(fit, data = subs, risk.table = "percentage", risk.table.title = "Percent Left",
+ggsurvplot(fit, data = subs, risk.table = "percentage", risk.table.title = "Percent Remaining",
            break.x.by = 60, xlim = c(0, 365))
 ```
 
 ![](business_subscription_survival_files/figure-markdown_github/unnamed-chunk-7-1.png)
 
-Well we can see that when we're missing a `user_id` for a subscription, they don't tend to fair so well.
+Well we can see that when we're missing a `user_id` for a subscription, they don't tend to fair so well. This one might not be so useful.
+
+Let's focus on the first 60 days for Business subscriptions and start engineering feautures to train our models on. :)
