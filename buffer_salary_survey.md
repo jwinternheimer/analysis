@@ -11,7 +11,7 @@ Conclusions
 
 To understand the conclusions, scroll down to the bottom of the page and view the graph with the nodes, words, and arrows. :)
 
-Overall, I believe the graph illustrates the factors people find important quite well. **Market rates**, and their fluctuations, may lead to uncertainty about how uncontrollable forces might affect salaries. **Location** would naturally be an important consideration for a global, remote, and distributed team. This may lead to questions about **equal compensation** for equal work, with an emphasis on retaining incentives to grow and achieve more (I can work really hard and get promoted, or move to New York). And of course we must consider these factors in relation to the **current salary formula**.
+Overall, I believe the graph illustrates the factors people find important quite well. **Market rates**, and their fluctuations, may lead to uncertainty about how uncontrollable forces might affect salaries. **Location** would naturally be an important consideration for a global, remote, and distributed team. This may lead to questions about **equal compensation** for equal work, with an emphasis on retaining incentives to grow and achieve more (one can achieve the same increase in salary through hard work and promotion, or moving locations). And of course we must consider these factors in relation to the **current salary formula**.
 
 ``` r
 # Import libraries
