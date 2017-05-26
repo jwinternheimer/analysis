@@ -9,7 +9,7 @@ The purpose of this analysis is to distill and better understand what topics and
 ## Conclusions
 To understand the conclusions, scroll down to the bottom of the page and view the graph with the nodes, words, and arrows. :) 
 
-Overall, I believe the graph illustrates the factors people find important quite well. **Market rates**, and their fluctuations, may lead to uncertainty about how uncontrollable forces might affect salaries. **Location** would naturally be an important consideration for a global, remote, and distributed team. This may lead to questions about **equal compensation** for equal work, with an emphasis on retaining incentives to grow and achieve more (one can achieve the same increase in salary through hard work and promotion, or moving locations). And of course we must consider these factors in relation to the **current salary formula**. 
+Overall, I believe the graph illustrates the factors people find important quite well. **Market rates**, and their fluctuations, may lead to uncertainty about how uncontrollable forces might affect salaries. Market rates differ quite a bit by **location**, which would naturally be an important consideration for a global, remote, and distributed team. This may lead to questions about **equal compensation** for equal work, with an emphasis on retaining incentives to grow and achieve more (one can achieve the same increase in salary through hard work and promotion, or moving locations). And of course we must consider these factors in relation to the **current salary formula**. 
 
 ```{r message = F, warning = F}
 # Import libraries
@@ -233,14 +233,13 @@ We can convert an igraph object into a ggraph with the ggraph function, after wh
 ```{r echo = F}
 # Load library
 library(ggraph)
-set.seed(2017)
 
 # Set the error features
 a <- grid::arrow(type = "closed", length = unit(.1, "inches"))
 
 # Create the graph
 ggraph(bigram_graph, layout = "fr") +
-  geom_edge_link(aes(edge_alpha = n), show.legend = F, arrow = a, end_cap = circle(.07, 'inches')) +
+  geom_edge_link(aes(edge_alpha = n), show.legend = F, arrow = a, end_cap = circle(.1, 'inches')) +
   geom_node_point(color = "lightblue", size = 3) +
   geom_node_text(aes(label = name), vjust = 1, hjust = 1) +
   theme_void()
@@ -248,4 +247,4 @@ ggraph(bigram_graph, layout = "fr") +
 
 We can use this graph to visualize some details about the text structure. For example, we can see that "market" forms the center of a group of nodes containing the words like "rates" and "job". We also see pairs or triplets along the outside that form common short phrases ("skill level", "location factor", or "compensated equally").
 
-I believe this graph illustrates the factors people find important quite well. Market rates, and their fluctuations, may lead to uncertainty about how uncontrollable forces might affect salaries. Location would naturally be a consideration for a global, remote, and distributed team. This may lead to questions about equal compensation for equal work. And of course we must tie consider these factors in relation to the current salary formula. 
+Overall, I believe this graph illustrates the factors people find important quite well. **Market rates**, and their fluctuations, may lead to uncertainty about how uncontrollable forces might affect salaries. Market rates differ quite a bit by **location**, which would naturally be an important consideration for a global, remote, and distributed team. This may lead to questions about **equal compensation** for equal work, with an emphasis on retaining incentives to grow and achieve more (one can achieve the same increase in salary through hard work and promotion, or moving locations). And of course we must consider these factors in relation to the **current salary formula**. 
