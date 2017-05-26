@@ -1,0 +1,251 @@
+---
+title: "Salary Formula Survey Analysis"
+output: github_document
+---
+
+## Motivation
+The purpose of this analysis is to distill and better understand what topics and concepts team members would like Buffer to consider when designing the new salary formula. To do that we'll simply list the top individual words and pairs of words, and visualize their relationship to one another.
+
+## Conclusions
+To understand the conclusions, scroll down to the bottom of the page and view the graph with the nodes, words, and arrows. :) 
+
+Overall, I believe the graph illustrates the factors people find important quite well. **Market rates**, and their fluctuations, may lead to uncertainty about how uncontrollable forces might affect salaries. **Location** would naturally be an important consideration for a global, remote, and distributed team. This may lead to questions about **equal compensation** for equal work, with an emphasis on retaining incentives to grow and achieve more (I can work really hard and get promoted, or move to New York). And of course we must consider these factors in relation to the **current salary formula**. 
+
+```{r message = F, warning = F}
+# Import libraries
+library(buffer); library(dplyr); library(tidyr); library(ggplot2); library(tidytext)
+```
+
+## Data collection
+Let's import the survey results from a CSV file.
+
+```{r}
+# Import data from CSV
+results <- read.csv("~/Downloads/salary_survey.csv", header = T)
+```
+
+```{r echo = F}
+# Rename columns
+colnames(results) <- safe_names(colnames(results))
+
+# Set employee answer to character type
+results$employee_answer <- as.character(results$employee_answer)
+```
+
+Cool! We have 59 responses so far. Let's do a little bit of cleanup to get the text ready for analysis. I see that some of these responses are actually _replies_ to responses, so let's filter them out.
+
+```{r}
+# Filter out replies
+responses <- results %>%
+  filter(is_reply == FALSE)
+```
+
+Great. Now we have 31 responses to work with. Let's work on tidying the answers!
+
+## Tidy the text
+To get a tidy data format, we need to both break the comments into individual tokens and transform it to a tidy data structure. To do this, we use tidytext’s `unnest_tokens()` function. This breaks the survey responses into individual words and includes one word per row while retaining the attributes (segment, user_id, etc) of that word.
+
+Later on, we can choose to define a token as a group of 2, 3, or `n` words to look at common phrases. :)
+
+```{r}
+# Unnest the tokens
+text <- responses %>%
+  unnest_tokens(word, employee_answer)
+```
+
+Sweet! Here is a small sample how the resulting data frame looks:
+
+```{r}
+# Preview data
+head(text)
+```
+
+Oftentimes in text analysis, we will want to remove stop words; stop words are words that are not useful for an analysis, typically extremely common words such as "the", "of", "to", and so forth in English. We can remove stop words (kept in the tidytext dataset `stop_words`) with an `anti_join()`.
+
+```{r}
+# Collect stop words
+data(stop_words)
+
+# Remove stop words from our dataset with an anti_join()
+text <- text %>%
+  anti_join(stop_words, by = "word")
+```
+
+Great! I think we've got a tidy data frame now.
+
+## Exploratory analysis
+Let's take a moment here to see the most common words overall from the survey results.
+
+```{r echo = F}
+# Find most common words
+text %>%
+  count(word, sort = TRUE) %>%
+  filter(n > 4) %>%
+  mutate(word = reorder(word, n)) %>%
+  ggplot(aes(word, n)) +
+  geom_col() +
+  labs(x = "", y = "", title = "Most Common Words") + 
+  coord_flip()
+```
+
+## Sentiment
+Now let's look at the most common words _by sentiment_. We'll use the `nrc` dataset which includes a list of words and their associated sentiments.
+
+```{r}
+# Get NRC sentiments
+nrc <- get_sentiments("nrc")
+
+# Join sentiments with comments
+text %>%
+  inner_join(nrc, by = "word") %>%
+  count(sentiment, sort = TRUE)
+```
+
+Cool, we see mostly positive and trusting words in the responses! There are, however a fair amount of negative, sad, and fearful words as well.
+
+Let's see if we can look at the most common words for only positive and negative sentiments
+
+```{r}
+# Get bing sentiments
+bing_word_counts <- text %>%
+  inner_join(get_sentiments("bing"), by = "word") %>%
+  count(word, sentiment, sort = TRUE) %>%
+  ungroup()
+
+# View the word counts
+head(bing_word_counts)
+```
+
+That's great to see positive sentiment words occurring most frequently! Now let's plot the frequency of words for each sentiment.
+
+```{r warning = F, message = F, echo = F}
+# Plot most common words by sentiment
+bing_word_counts %>%
+  group_by(sentiment) %>%
+  top_n(7) %>%
+  ungroup() %>%
+  mutate(word = reorder(word, n)) %>%
+  ggplot(aes(word, n, fill = sentiment)) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(~sentiment, scales = "free_y") +
+  labs(y = "Contribution to sentiment",
+       x = NULL) +
+  coord_flip()
+```
+
+This is interesting, but I think we may be able to get a little more context by looking at groups of words instead of only single words.
+
+## N-grams
+Let's start out by looking at groups of two words. We'll call them bigrams.
+
+```{r}
+# Unnest bigrams from NPS responses
+bigrams <- responses %>%
+  unnest_tokens(bigram, employee_answer, token = "ngrams", n = 2) 
+
+# View the bigrams
+head(bigrams$bigram)
+```
+
+And now let's look at the most common bigrams. 
+
+```{r}
+# Count the most common bigrams
+bigrams %>%
+  count(bigram, sort = TRUE)
+```
+
+As we might expect, a lot of the most common bigrams are groups of common words. This is a useful time to use the `separate()` function, which splits a column into multiple based on a delimiter. This lets us separate it into two columns, "word1" and "word2" at which point we can remove cases where either is a stop-word.
+
+```{r}
+# Separate words in bigrams
+separated <- bigrams %>%
+  separate(bigram, c("word1", "word2"), sep = " ")
+
+# Filter out stop-words
+filtered <- separated %>%
+  filter(!word1 %in% stop_words$word) %>%
+  filter(!word2 %in% stop_words$word)
+
+# Calculate new bigram counts
+bigram_counts <- filtered %>% 
+  count(word1, word2, sort = TRUE)
+
+bigram_counts
+```
+
+Looking better! Now lets us recombine the columns into one and look at the _new_ most common bigrams
+
+```{r}
+# Reunite the words
+bigrams_united <- filtered %>%
+  unite(bigram, word1, word2, sep = " ")
+
+# Find most common bigrams
+bigrams_united %>%
+  count(bigram, sort = TRUE)
+```
+
+Alright! Now let's plot the most frequent bigrams.
+
+```{r echo = F}
+# Find most common bigrams
+bigrams_united %>%
+  count(bigram, sort = TRUE) %>%
+  filter(n > 1) %>%
+  mutate(bigram = reorder(bigram, n)) %>%
+  ggplot(aes(bigram, n)) +
+  geom_col() +
+  labs(x = "", y = "", title = "Most Common Bigrams") + 
+  coord_flip()
+```
+
+## Visualizing networks of words
+For this visualization we can arrange the words into a network, or "graph". Here we’ll be referring to a graph not in the sense of a visualization, but as a combination of connected nodes. A graph can be constructed from a tidy object since it has three variables:
+
+ - from: the node an edge is coming from
+ - to: the node an edge is going towards
+ - weight: A numeric value associated with each edge
+
+Let's give it a shot.
+
+```{r warning = F, message = F}
+# Load igraph library
+library(igraph)
+
+# Original counts
+bigram_counts
+```
+
+Now let's create a bigram graph object.
+
+```{r}
+# Filter for only relatively common combinations
+bigram_graph <- bigram_counts %>%
+  filter(n > 1) %>%
+  graph_from_data_frame()
+
+bigram_graph
+```
+
+We can convert an igraph object into a ggraph with the ggraph function, after which we add layers to it, much like layers are added in ggplot2. For example, for a basic graph we need to add three layers: nodes, edges, and text.
+
+```{r echo = F}
+# Load library
+library(ggraph)
+set.seed(2017)
+
+# Set the error features
+a <- grid::arrow(type = "closed", length = unit(.1, "inches"))
+
+# Create the graph
+ggraph(bigram_graph, layout = "fr") +
+  geom_edge_link(aes(edge_alpha = n), show.legend = F, arrow = a, end_cap = circle(.07, 'inches')) +
+  geom_node_point(color = "lightblue", size = 3) +
+  geom_node_text(aes(label = name), vjust = 1, hjust = 1) +
+  theme_void()
+```
+
+We can use this graph to visualize some details about the text structure. For example, we can see that "market" forms the center of a group of nodes containing the words like "rates" and "job". We also see pairs or triplets along the outside that form common short phrases ("skill level", "location factor", or "compensated equally").
+
+I believe this graph illustrates the factors people find important quite well. Market rates, and their fluctuations, may lead to uncertainty about how uncontrollable forces might affect salaries. Location would naturally be a consideration for a global, remote, and distributed team. This may lead to questions about equal compensation for equal work. And of course we must tie consider these factors in relation to the current salary formula. 
