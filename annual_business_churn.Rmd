@@ -1,0 +1,373 @@
+---
+title: "Annual Business Subscription Churn"
+output: github_document
+---
+
+## Motivation
+The purpose of this analysis is to gain a better understanding of _subscription churn_ and the factors that influence it. In particular, we will focus on _annual_ subscriptions in this analysis.
+
+```{r setup, include = F}
+library(buffer); library(dplyr); library(ggplot2); library(survival); library(survminer)
+```
+
+## Findings and conclusions
+This sample of 10 customers suggests that there may be some confusion with trials, particularly with the `business_v2_small_yearly` plan. 
+
+Several of the customers started and canceled trials _and_ asked for refunds. Most of these users have also had previous subscriptions, so we probably had their credit cards on file. These customers may or may have known if, when, and exactly how much they were going to get charged.
+
+In other cases, the `busines_v2_small_yearly` plan might not have been the right fit. Almost all of these subscriptions were canceled very quickly after beginning.
+
+## Data collection and tidying
+Let's analyze _business_ subscriptions created after January 1, 2016. The dataset we use comes from [**this Look**](https://looker.buffer.com/looks/3859). We'll import it to R using the `buffer` package.
+
+```{r warning = F, message = F}
+# Get data from Looker
+subs <- get_look(3859)
+```
+
+There are over 8000 subscriptions in the dataset. Let's do a bit of cleanup and calculate the length of each subscription. The code to do that has been hidden.
+
+```{r include = F}
+# Rename columns
+colnames(subs) <- c('created_at', 'canceled_at', 'ended_at', 'status', 'id', 'plan', 
+                    'gateway', 'billing_cycle', 'amount', 'customer_id')
+
+# Set dates as date objects
+subs$created_at <- as.Date(subs$created_at, "%Y-%m-%d")
+subs$canceled_at <- as.Date(subs$canceled_at, "%Y-%m-%d")
+subs$ended_at <- as.Date(subs$ended_at, "%Y-%m-%d")
+
+# Calculate subscription length
+subs <- subs %>%
+  mutate(length = as.numeric(canceled_at - created_at),
+         churned = !(is.na(canceled_at)))
+```
+
+After cleaning, this is what the dataframe looks like:
+
+```{r}
+head(subs)
+```
+
+Now, to only look at _annual_ subscriptions, let's filter on the `billing_cycle`.
+
+```{r}
+# Filter out monthly subscriptions
+annual <- subs %>%
+  filter(billing_cycle == 'year')
+```
+
+## Survival analysis
+To get a better understanding of exactly when these Business customers churn, let's do a quick survival analysis. Clasically, survival analysis was used to model the time it takes for people to die of a disease. However it can be used to model and analyze the time it takes for a specific event to occur, churn in this case. 
+
+It's particularly useful in this case because of missing data -- there must be subscriptions that will churn in our dataset _that haven't done so yet_. This is called _censoring_, and in particular _right censoring_.
+
+Right censoring occurs when the date of the event is unknown, but is after some known date. Survival analysis can account for this kind of censoring.
+
+There is also left censoring, for example when the date the subscription begain is unknown, but that is less applicable to our case.
+
+The survival function, or survival curve, (`S`) models the probability that the time of the event (`T`) is greater than some specified time (`t`).
+
+Let's build the survival curve and plot it.
+
+```{r message = F, warning = F}
+# Kaplan Meier survival curve
+annual$survival <- Surv(annual$length, annual$churned)
+
+# Fit the model
+fit <- survfit(survival ~ 1, data = annual)
+
+# Create survival plot
+ggsurvplot(fit, data = annual, risk.table = "percentage", risk.table.title = "Percent Remaining",
+           break.x.by = 60, xlim = c(0, 365))
+```
+
+The plot shows the percent of annual Business subscriptions still active X days after creating the subscription, and table below the graph shows the percent of subscription still remaining after X days. 
+By the end of the billing period (one year), only around 22% of subscriptions remain active.
+
+It's also striking to see that only 64% of annual subscriptions are still active 60 days after creation. Looking at the graph, we can see that there is a heavy amount of churn in the first few days. Let's zoom in on this crucial time period.
+
+```{r echo = F}
+# Create survival plot
+ggsurvplot(fit, data = annual, risk.table = "percentage", risk.table.title = "Percent Remaining",
+           break.x.by = 7, xlim = c(0, 70))
+```
+
+This plot zooms in on the first 70 days of the subscription. After 7 days, only 75% of the subscriptions remain. This is the biggest dropoff by far, and most of those subscriptions churned on the first day! 
+
+Let's look at these subscriptions.
+
+```{r}
+# Get subscriptions that churned on first day
+churned <- annual %>%
+  select(-survival) %>%
+  filter(length == 0)
+```
+
+There are 75 of these subscriptions. **The first day alone accounts for over 14% of _all_ churned subscriptions!**
+
+Let's count these subscriptions by payment gateway.
+
+```{r}
+# Group by payment gateway
+churned %>%
+  group_by(gateway) %>%
+  count
+```
+
+...and let's group by the plan as well.
+
+```{r}
+# Group by plan
+churned %>%
+  group_by(plan) %>%
+  count %>%
+  arrange(desc(n))
+```
+
+The majority of these cases are small business yearly plans, which is to be expected. Let's grab a random sample of 10 of these subscriptions.
+
+## Individual churned customers
+Let's start by getting a random sample of 10 customers.
+
+```{r}
+# Get sample of 10 customers
+sample <- churned %>%
+  sample_n(size = 10) %>%
+  mutate(customer_id = as.character(customer_id))
+```
+
+We'll use SQL to look at the stripe events of each customer.
+
+```{r include = F}
+con <- redshift_connect()
+```
+
+
+#### Customer 1
+Let's look at the stripe events of the first customer in the dataframe.
+
+```{r}
+cus1 <- sample[1, ]$customer_id
+```
+
+```{sql connection=con}
+select 
+    date
+    , type
+    , json_extract_path_text(data, 'object', 'customer') as customer
+    , json_extract_path_text(data, 'object','plan','id') as plan_id
+    , json_extract_path_text(data, 'object','subscription') as sub_id
+    , data
+from stripe_api_events events
+where json_extract_path_text(data, 'object', 'customer') = ?cus1
+order by date desc
+limit 100
+```
+
+This user was previously on a monthly Awesome plan before switching to a yearly Small Business plan. The user decided to cancel the subscription at the end of the billing period shortly after creating the subscription. Let's look at the next customer.
+
+#### Customer 2
+
+```{r}
+cus2 <- sample[2, ]$customer_id
+```
+
+```{sql connection=con}
+select 
+    date
+    , type
+    , json_extract_path_text(data, 'object', 'customer') as customer
+    , json_extract_path_text(data, 'object','plan','id') as plan_id
+    , json_extract_path_text(data, 'object','subscription') as sub_id
+    , data
+from stripe_api_events events
+where json_extract_path_text(data, 'object', 'customer') = ?cus2
+order by date desc
+limit 100
+```
+
+This customer was also previously on a monthly Awesome plan before switching to an annual Small Business _trial_. The subscription was created, quickly deleted, and a _new_, separate small business plan was created.
+
+#### Customer 3
+
+```{r}
+cus3 <- sample[3, ]$customer_id
+```
+
+```{sql connection=con}
+select 
+    date
+    , type
+    , json_extract_path_text(data, 'object', 'customer') as customer
+    , json_extract_path_text(data, 'object','plan','id') as plan_id
+    , json_extract_path_text(data, 'object','subscription') as sub_id
+    , data
+from stripe_api_events events
+where json_extract_path_text(data, 'object', 'customer') = ?cus3
+order by date desc
+limit 100
+```
+
+This customer was also previously on an Awesome monthly plan. The user switched to an annual business _trial_ and deleted the subscription 1 second later. 
+
+#### Customer 4
+
+```{r}
+cus4 <- sample[4, ]$customer_id
+```
+
+```{sql connection=con}
+select 
+    date
+    , type
+    , json_extract_path_text(data, 'object', 'customer') as customer
+    , json_extract_path_text(data, 'object','plan','id') as plan_id
+    , json_extract_path_text(data, 'object','subscription') as sub_id
+    , data
+from stripe_api_events events
+where json_extract_path_text(data, 'object', 'customer') = ?cus4
+order by date desc
+limit 100
+```
+
+This customer was also on an Awesome monthly plan, switched to a Small Business yearly plan, and canceled it 10 minutes later.
+
+#### Customer 5
+
+```{r}
+cus5 <- sample[5, ]$customer_id
+```
+
+```{sql connection=con}
+select 
+    date
+    , type
+    , json_extract_path_text(data, 'object', 'customer') as customer
+    , json_extract_path_text(data, 'object','plan','id') as plan_id
+    , json_extract_path_text(data, 'object','subscription') as sub_id
+    , data
+from stripe_api_events events
+where json_extract_path_text(data, 'object', 'customer') = ?cus5
+order by date desc
+limit 100
+```
+
+This customer was a new customer, started a Small Business yearly plan, paid, and canceled it 30 seconds later.
+
+#### Customer 6
+
+```{r}
+cus6 <- sample[6, ]$customer_id
+```
+
+```{sql connection=con}
+select 
+    date
+    , type
+    , json_extract_path_text(data, 'object', 'customer') as customer
+    , json_extract_path_text(data, 'object','plan','id') as plan_id
+    , json_extract_path_text(data, 'object','subscription') as sub_id
+    , data
+from stripe_api_events events
+where json_extract_path_text(data, 'object', 'customer') = ?cus6
+order by date desc
+limit 100
+```
+
+This customer was also on a monthly Awesome plan. The user started a Small Business yearly trial, canceled it quickly, and created a new active Small Business yearly subscription.
+
+#### Customer 7
+
+```{r}
+cus7 <- sample[7, ]$customer_id
+```
+
+```{sql connection=con}
+select 
+    date
+    , type
+    , json_extract_path_text(data, 'object', 'customer') as customer
+    , json_extract_path_text(data, 'object','plan','id') as plan_id
+    , json_extract_path_text(data, 'object','subscription') as sub_id
+    , data
+from stripe_api_events events
+where json_extract_path_text(data, 'object', 'customer') = ?cus7
+order by date desc
+limit 100
+```
+
+This customer started a Small Business yearly trial, was charged, got a refund, and canceled the subscription.
+
+#### Customer 8
+
+```{r}
+cus8 <- sample[8, ]$customer_id
+```
+
+```{sql connection=con}
+select 
+    date
+    , type
+    , json_extract_path_text(data, 'object', 'customer') as customer
+    , json_extract_path_text(data, 'object','plan','id') as plan_id
+    , json_extract_path_text(data, 'object','subscription') as sub_id
+    , data
+from stripe_api_events events
+where json_extract_path_text(data, 'object', 'customer') = ?cus8
+order by date desc
+limit 100
+```
+
+This seems like a normal customer that started a yearly trial, canceled it, and ended up on an active Small Business yearly subscription.
+
+#### Customer 9
+
+```{r}
+cus9 <- sample[9, ]$customer_id
+```
+
+```{sql connection=con}
+select 
+    date
+    , type
+    , json_extract_path_text(data, 'object', 'customer') as customer
+    , json_extract_path_text(data, 'object','plan','id') as plan_id
+    , json_extract_path_text(data, 'object','subscription') as sub_id
+    , data
+from stripe_api_events events
+where json_extract_path_text(data, 'object', 'customer') = ?cus9
+order by date desc
+limit 100
+```
+
+This customer switched back and forth between an Awesome yearly and Small Business yearly subscription before finally getting a refund and canceling the Small Business subscription.
+
+#### Customer 10
+
+```{r}
+cus10 <- sample[10, ]$customer_id
+```
+
+```{sql connection=con}
+select 
+    date
+    , type
+    , json_extract_path_text(data, 'object', 'customer') as customer
+    , json_extract_path_text(data, 'object','plan','id') as plan_id
+    , json_extract_path_text(data, 'object','subscription') as sub_id
+    , data
+from stripe_api_events events
+where json_extract_path_text(data, 'object', 'customer') = ?cus10
+order by date desc
+limit 100
+```
+
+It looks like this customer has switched between Awesome yearly and Small Business yearly plans, taking advantage of multiple trials along the way. The subscription has several failed payments and is in a "past due" state currently.
+
+## Conclusions
+This sample of 10 customers suggests that there may be some confusion with trials, particularly with the `business_v2_small_yearly` plan. 
+
+Several of the customers started and canceled trials _and_ asked for refunds. Most of these users have also had previous subscriptions, so we probably had their credit cards on file. These customers may or may have known if, when, and exactly how much they were going to get charged.
+
+In other cases, the `busines_v2_small_yearly` plan might not have been the right fit. Almost all of these subscriptions were canceled very quickly after beginning.

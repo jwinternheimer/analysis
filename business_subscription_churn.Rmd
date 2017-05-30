@@ -1,0 +1,632 @@
+---
+title: "Subscription Churn"
+output: github_document
+author: "Julian"
+date: "May 26, 2017"
+---
+
+## Motivation
+The goal of this analysis is to predict subscription churn and identify factors or behaviors that singificantly influence its probability. In this analysis we will look at a subset of subscriptions, specifically monthly Business subscriptions. 
+
+This is a continuation of the [**subscription churn**](https://github.com/jwinternheimer/analysis/blob/master/Subscription_Churn.md) analysis done for all subscriptions created in 2016. We will use a similar approach in this analysis, looking at the same features and using the same methods, including decision trees, logistic regression, and random forests.
+
+```{r setup, include = F}
+# Load libraries
+library(buffer); library(dplyr); library(ggplot2); library(tidyr)
+```
+
+## Data collection
+Let's grab the subscriptions data from Looker using the `buffer` package.
+
+```{r}
+# Get the data from Looker
+subs <- get_look(3861)
+```
+
+We have over 60K subscriptions in our dataset. Let's clean up the data a bit and get it ready for analysis.
+
+```{r}
+# Rename columns
+colnames(subs) <- c('user_id', 'user_joined_at', 'team_members', 'profiles', 
+                    'created_at', 'canceled_at', 'id', 'status', 'plan', 'billing_cycle', 
+                    'amount', 'days_to_activate', 'country', 'referred_by_marketing', 
+                    'visited_before_joining', 'charges', 'nps_responses', 'nps_score',
+                    'helpscout_convos')
+
+# Set dates as date objects
+subs$user_joined_at <- as.Date(subs$user_joined_at, "%Y-%m-%d")
+subs$created_at <- as.Date(subs$created_at, "%Y-%m-%d")
+subs$canceled_at <- as.Date(subs$canceled_at, "%Y-%m-%d")
+
+# Set NPS score as a factor
+subs$nps_score <- as.factor(subs$nps_score)
+
+# Set id as character type
+subs$id <- as.character(subs$id)
+```
+
+Now let's filter out the awesome subscriptions and the yearly subscriptions.
+
+```{r}
+# Identify business subscriptions
+business_index <- grep("business", subs$plan, ignore.case = T)
+
+# Filter to only business subscriptions
+business <- subs[business_index, ]
+
+# Remove yearly subscriptions
+business <- business %>%
+  filter(billing_cycle == "month")
+```
+
+Alright, we're down to around 4500 subscriptions! We also would like to get the number of updates sent by these users _in the first 60 days after starting the subscription_. Let's see if we can't get these updates.
+
+```{r}
+# Load saved updates
+load("updates.Rda")
+
+# Join updates into business dataframe
+business <- business %>%
+  left_join(updates, by = "id")
+
+# Replace NAs with 0
+business$updates_count[is.na(business$updates_count)] <- 0
+```
+
+Now I want to know how many days users were active in the first 60 days after starting a subscription.
+
+```{r}
+# Load saved activity data
+load("activity.Rda")
+
+# Join activity into business dataframe
+business <- business %>%
+  left_join(activity, by = "id")
+
+# Replace NAs with 0
+business$days_active[is.na(business$days_active)] <- 0
+```
+
+Great, we're almost there. Let's take care of missing values now.
+
+```{r}
+# Replace NAs with 0s
+business$helpscout_convos[is.na(business$helpscout_convos)] <- 0
+business$nps_responses[is.na(business$nps_responses)] <- 0
+business$profiles[is.na(business$profiles)] <- 0
+business$team_members[is.na(business$team_members)] <- 0
+business$update_profiles[is.na(business$update_profiles)] <- 0
+```
+
+Now let's calculate the length of the subscription in days for those that have cancelled and add an indicator to show if the subscription has been canceled. We may also want to know if a user had churned within the first 60 days, so let's add the indicator variable `churned_within_60_days` as well.
+
+```{r}
+# Calculate subscription length
+business <- business %>%
+  mutate(length = as.numeric(canceled_at - created_at),
+         churned = ifelse(is.na(canceled_at), 0, 1)) %>%
+  mutate(churned_within_60_days = ifelse((length <= 60 & !(is.na(length))), 1, 0))
+```
+
+We also know that users have differing numbers of profiles, and that the number of profiles is correllated with the number of updates scheduled. To account for this multicollinearity, let's create the metric `updates_per_profile`. We need to also account for users that have 0 values for profiles _and_ have updates.
+
+```{r}
+# Calculate updates per profile
+business <- business %>%
+  mutate(updates_per_profile = ifelse(updates_count > 0 & profiles == 0, 
+                                      updates_count / update_profiles, updates_count / profiles))
+
+# Replace NAs with 0
+business$updates_per_profile[is.na(business$updates_per_profile)] <- 0
+```
+
+That's great! One last metric I'd like to create: the age of the Buffer account when the subscription was created.
+
+```{r}
+# Calculate buffer account age
+business <- business %>%
+  mutate(account_age = as.numeric(created_at - user_joined_at))
+```
+
+Cool.
+
+## Exploratory analysis
+Now that we've gotten this far, let's try to get a better feel for the data. Let's start by seeing how many of these monthly business subscriptions churned within 60 days.
+
+```{r}
+business %>%
+  group_by(churned_within_60_days) %>%
+  summarise(subscriptions = n_distinct(id)) %>%
+  mutate(percentage = subscriptions / sum(subscriptions))
+```
+
+Around 21% of these subscriptions churned within 60 days of starting the subscription. Now let's look at the distribution of `updates_per_profile` and see how that correlates with the length of a subscription.
+
+```{r echo = F}
+# Plot distribution of updates per profile
+ggplot(business, aes(x = updates_per_profile)) +
+  geom_density() +
+  scale_x_continuous(limits = c(0, 250)) +
+  labs(x = 'Updates Per Profile', y = 'Density')
+```
+
+Let's take a look at the churn rates and see if they correlate with the number of updates scheduled per profile. Because it is a numeric variable, it may be easier to "bin" the data into buckets and calculate the churn rate for each bucket.
+
+We'll use the following code to make 10 bins.
+
+```{r}
+# Make the cuts to bin the data
+cuts <- unique(as.numeric(quantile(business$updates_per_profile, probs = seq(0, 1, 0.1))))
+cuts <- c(-1, cuts)
+
+# Cut the updates per profile into bins
+business <- business %>%
+  mutate(updates_bin = cut(updates_per_profile, cuts))
+```
+
+Now let's plot the churn rate for users in each bin.
+
+```{r echo = F}
+# Group subscriptions by update bin
+by_bin <- business %>%
+  group_by(updates_bin, churned) %>%
+  summarise(subscriptions = n_distinct(id)) %>%
+  mutate(percentage = subscriptions / sum(subscriptions)) %>%
+  filter(churned == T)
+
+# Visualize the churn percentages
+ggplot(by_bin, aes(x = updates_bin, y = percentage)) +
+  geom_bar(stat = 'identity') +
+  labs(x = 'Number of Updates Bucket', y = 'Churn Rate')
+
+# Remove by_bin dataframe
+rm(by_bin)
+```
+
+Nice! We can see that there appears to be a slight negative correlation, which is what we would expect. A whopping 80% of subscriptions with 0 updates in the first 60 days churned. 
+
+How does this look for the number of team members people have?
+
+```{r echo = F}
+# Make the cuts to bin the data
+cuts <- unique(as.numeric(quantile(business$team_members, probs = seq(0, 1, 0.1))))
+cuts <- c(-1, cuts)
+
+# Cut the updates per profile into bins
+business <- business %>%
+  mutate(team_members_bin = cut(team_members, cuts))
+
+# Group subscriptions by team members bin
+by_bin <- business %>%
+  group_by(team_members_bin, churned) %>%
+  summarise(subscriptions = n_distinct(id)) %>%
+  mutate(percentage = subscriptions / sum(subscriptions)) %>%
+  filter(churned == T)
+
+# Visualize the churn percentages
+ggplot(by_bin, aes(x = team_members_bin, y = percentage)) +
+  geom_bar(stat = 'identity') +
+  labs(x = 'Number of Team Members Bucket', y = 'Churn Rate')
+
+# Remove by_bin dataframe
+rm(by_bin)
+```
+
+Interesting! It does seem that the churn rate is negatively correlated with the number of team members, which also makes sense!
+
+## Single variable models
+We'll use the same approach that we used in the previous analysis! Much of the code is hidden for readability, but it is available to view in the previous analysis or in the .Rmd file. :)
+
+First though, let's split our dataset into training and testing sets.
+
+```{r}
+# Set seed for reproducible results
+set.seed(2356)
+
+# Set random groups
+business$rgroup <- runif(dim(business)[[1]])
+
+# Split out training and testing sets
+training <- subset(business, rgroup <= 0.8)
+testing <- subset(business, rgroup > 0.8)
+```
+
+```{r warning = F, message = F, include = F}
+# Given a vector of outcomes (outCol), a categorical training variable (varCol), 
+# and a prediction variable (appCol), use outCol and varCol to build a single-variable model 
+# and then apply the model to appCol to get new predictions.
+
+library('ROCR')
+
+pos <- 1
+
+make_prediction_categorical <- function(outCol, varCol, appCol) {
+  
+  # Find how often the outcome is positive during training
+  pPos <- sum(outCol == pos) / length(outCol)
+  
+  # We need this to handle NA values
+  naTab <- table(as.factor(outCol[is.na(varCol)]))
+  
+  # Get stats on how often outcome is positive for NA values in training
+  pPosWna <- (naTab/sum(naTab))[pos]
+  
+  vTab <- table(as.factor(outCol),varCol)
+  
+  # Get stats on how often outcome is positive, conditioned on levels of the variable
+  pPosWv <- (vTab[pos, ] + 1.0e-3 * pPos) / (colSums(vTab) + 1.0e-3)
+  
+  # Make predictions by looking up levels of appCol
+  pred <- pPosWv[appCol]
+  
+  # Add predictions for NA values
+  pred[is.na(appCol)] <- pPosWna
+  
+  # Add in predictions for levels of appCol that weren’t known during training
+  pred[is.na(pred)] <- pPos
+  
+  pred
+
+} 
+
+
+# Define a function to calculate AUC
+calcAUC <- function(predcol,outcol) {
+  
+  perf <- performance(prediction(predcol,outcol==pos),'auc') 
+  as.numeric(perf@y.values)
+  
+}
+
+# Define a function that makes predictions
+make_prediction_numeric <- function(outCol, varCol, appCol) {
+  
+  # Make the cuts to bin the data
+  cuts <- unique(as.numeric(quantile(varCol, probs = seq(0, 1, 0.1), na.rm = T)))
+  cuts <- c(-1, cuts)
+  
+  varC <- cut(varCol, cuts)
+  appC <- cut(appCol, cuts)
+  
+  # Now apply the categorical make prediction function
+  make_prediction_categorical(outCol, varC, appC)
+  
+}
+```
+
+Now let's loop through the categorical variables and make predictions.
+
+```{r}
+# Identify categorical varaibles
+catVars <- c('plan', 'country', 'referred_by_marketing', 'visited_before_joining', 'nps_score')
+
+# Loop through categorical varaibles and mkae predictions
+for(v in catVars) {
+  
+  # Make prediction for each categorical variable
+  pi <- paste('pred', v, sep='_')
+  
+  # Do it for the training and testing datasets
+  training[, pi] <- make_prediction_categorical(training[, "churned_within_60_days"], 
+                                               training[, v], training[,v]) 
+  
+  testing[, pi] <- make_prediction_categorical(training[, "churned_within_60_days"], 
+                                               training[, v], testing[,v]) 
+}
+
+for(v in catVars) {
+  
+  # Name the prediction variables
+  pi <- paste('pred', v, sep = '_')
+  
+  # Find the AUC of the variable on the training set
+  aucTrain <- calcAUC(training[, pi], training[, "churned_within_60_days"])
+  
+  # Find the AUC of the variable on the testing set  
+  aucTest <- calcAUC(testing[, pi], testing[, "churned_within_60_days"])
+    
+  # Print the results
+  print(sprintf("%s, trainAUC: %4.3f testingAUC: %4.3f", pi, aucTrain, aucTest))
+    
+}
+```
+
+These single variable models aren't better than random guesses unfortunately. Let's loop through the numeric variables now.
+
+```{r message = F, warning = F}
+# Define numeric variables
+numVars <- c('team_members', 'profiles', 'days_to_activate', 'updates_per_profile',
+             'updates_count','days_active', 'helpscout_convos', 'account_age')
+
+# Loop through the columns and apply the formula
+for(v in numVars) {
+  
+  # Name the prediction column
+  pi <- paste('pred', v, sep = '_')
+  
+  # Make predictions
+  training[, pi] <- make_prediction_numeric(training[, "churned_within_60_days"], 
+                                               training[, v], training[,v]) 
+  
+  testing[, pi] <- make_prediction_numeric(training[, "churned_within_60_days"], 
+                                               training[, v], testing[,v]) 
+  
+  
+ # Find the AUC of the variable on the training set
+  aucTrain <- calcAUC(training[, pi], training[, "churned_within_60_days"])
+  
+  # Find the AUC of the variable on the testing set  
+  aucTest <- calcAUC(testing[, pi], testing[, "churned_within_60_days"])
+    
+  # Print the results
+  print(sprintf("%s, trainAUC: %4.3f testingAUC: %4.3f", pi, aucTrain, aucTest))
+    
+}
+```
+
+These models didn't do very well either, but no matter! Let's move on to decision trees!
+
+## Decision trees
+Building decision trees involves proposing many possible _data cuts_ and then choosing the best cuts based on simultaneous competing criteria of predictive power, cross-validation strength, and interaction with other chosen cuts.
+
+One of the advantages of using a package for decision tree work is not having to worry about the construction details.
+
+```{r}
+# Import library
+library(rpart)
+
+# Define the outcome
+outcome <- "churned_within_60_days"
+
+# Define formula to use
+formula <- paste(outcome, '~', paste(c(catVars, numVars), collapse = ' + '), sep = '')
+
+# Fit a decision tree model
+tmodel <- rpart(formula, data = training)
+
+# Calculate AUC on training set
+print(calcAUC(predict(tmodel, newdata = training), training[, outcome]))
+
+# Calculate AUC on testing set
+print(calcAUC(predict(tmodel, newdata = testing), testing[, outcome]))
+```
+
+This model didn't do very great. We would hope for an AUC value around 0.8 or higher. Let's remove some of the features that had especially low AUC values in the single-variable model predictions.
+
+```{r}
+# Define features
+features <- c('account_age', 'helpscout_convos', 'days_active', 'updates_count', 'days_to_activate',
+              'profiles', 'team_members', 'referred_by_marketing', 'visited_before_joining', 'plan')
+
+# Define formula to use
+formula <- paste(outcome, '~', paste(features, collapse = ' + '), sep = '')
+
+# Fit a decision tree model
+tmodel <- rpart(formula, data = training)
+
+# Calculate AUC on training set
+print(calcAUC(predict(tmodel, newdata = training), training[, outcome]))
+
+# Calculate AUC on testing set
+print(calcAUC(predict(tmodel, newdata = testing), testing[, outcome]))
+```
+
+Still not very great. Let's take a look at the tree.
+
+```{r}
+# Show decision tree
+print(tmodel)
+```
+
+```{r}
+# Plot decision tree
+par(cex = 0.7)
+plot(tmodel)
+text(tmodel)
+```
+
+Interesting! There are only two splits. If the user was active 14 or more days during the first 60 days, only 15.6% churned. If the user was active 13 or less days, and had at least one update, the churn rate jumps to around 28%. If the user was active 13 or less days, and had no updates, the churn rate jumps all the way up to 48%. 
+
+Let's try out logistic regression.
+
+## Logistic regression
+Logistic regression is the most important member of a class of models called _generalized linear models_. Logistic regresion can directly predict values that are restricted to the (0, 1) interval, such as probabilities. 
+
+Let's build the model.
+
+```{r}
+# Define the features
+features <- c('account_age', 'helpscout_convos', 'days_active', 'days_to_activate','team_members',
+              'updates_per_profile','referred_by_marketing', 'visited_before_joining', 'plan')
+
+# Define formula to use
+formula <- paste(outcome, '~', paste(features, collapse = ' + '), sep = '')
+
+# Train regression model
+glm_model <- glm(formula, data = training, family = binomial(link = "logit"))
+```
+
+Let's make some predictions for both the training and testing sets.
+
+```{r}
+# Make predictions
+training$pred <- predict(glm_model, newdata = training, type = "response")
+testing$pred <- predict(glm_model, newdata = testing, type = "response")
+```
+
+Our goal is to use the model to classify new instances into one of two categories. We want the model to give high scores to positive instances and low scores otherwise.
+
+Let's plot the double-density plot of the predictions.
+
+```{r echo = F}
+# Plot double density plot
+ggplot(training, aes(x = pred, color = as.factor(churned_within_60_days), 
+                     linetype = as.factor(churned_within_60_days))) +
+  geom_density() +
+  labs(x = "Predicted Churn Probability", y = "", color = "Churned", linetype = "Churned")
+```
+
+
+Hmm that's not too bad. Ideally, we'd like the distribution of scores to be separated, with the scores of the negative instances to be concentrated on the left, and the distribution for the positive instances to be concentrated on the right. In this case, both distributions are concentrated somewhat on the left.
+
+In order to use the model as a classifier, you must pick a threshold, above which scores will be classified as positive and below as negative. 
+
+When you pick a threshold, you're trying to balance the _precision_ of the classifier (what fraction of the predicted positives are true positives) and its _recall_ (how many of the true positives the classifier finds).
+
+If the score distributions of the positive and negative instances are well separated, then we can pick an appropriate threshold in the "valley" between the two peaks. In the current case, the score distributions aren't well separated, which indicates that the model can't build a classifier that simultaneously achieves good recall and good precision. 
+
+But we can build a classifier that identifies a subset of situations with a higher-than-average rate of churn. We'll call the ratio of the classifier precision to the average rate of positives the _enrichment rate_.
+
+The higher we set the threshold, the more _precise_ the classifier will be; but we'll also miss a higher percentage of at-risk situations. 
+
+We'll use the training set to pick a threshold and use the training set to evaluate its performance.
+
+To help pick a threshold, we can use a plot that shows both enrichment and recall as a function of the threshold. The code to make the plot below is hidden. :)
+
+```{r warning = F, message = F, echo = F}
+library(ROCR); library(gridExtra)
+
+# Create a prediction object
+predObj <- prediction(training$pred, training$churned_within_60_days)
+
+# Create an ROCR object to calculate precision as a function of threshold
+precObj <- performance(predObj, measure = "prec")
+
+# Create an ROCR object to calculate recall as a function of threshold
+recObj <- performance(predObj, measure = "rec")
+
+# Extract precision and recall from S4 objects with @ notation
+precision <- (precObj@y.values)[[1]]
+recall <- (recObj@y.values)[[1]]
+
+# The x values (thresholds) are the same in both predObj and recObj
+prec.x <- (precObj@x.values)[[1]]
+
+# Build data frame
+rocFrame <- data.frame(threshold = prec.x, precision = precision, recall = recall)
+
+# Calculate rate of churn in the training set
+pnull <- mean(as.numeric(training$churned_within_60_days))
+
+p1 <- ggplot(rocFrame, aes(x = threshold)) +
+  geom_line(aes(y = precision / pnull)) +
+  coord_cartesian(xlim = c(0, 0.5), ylim = c(0, 5)) +
+  labs(x = "Threshold", y = "", title = "Enrichment and Threshold")
+
+p2 <- ggplot(rocFrame, aes(x = threshold)) +
+  geom_line(aes(y = recall)) +
+  coord_cartesian(xlim = c(0, 0.5)) +
+  labs(x = "Threshold", y = "", title = "Recall and Threshold")
+
+grid.arrange(p1, p2, ncol = 1)
+```
+
+Looking at the plots, you can see that higher thresholds result in more precise classifications, at the cost of missing more cases; a lower threhold will identify more cases, at the cost of many more false positives. 
+
+A threshold of 0.25 (which is around than the overall rate of churn) might be a good tradeoff. The resulting classifier will identify a set of potential churn situations that finds about 60% of all the true churn situations, with a true positive rate 1.5 times higher than the overall population. 
+
+Let's evaluate 0.5 as a threshold.
+
+```{r}
+# Build confusion matrix
+confuse <- table(pred = testing$pred >= 0.25, churned = testing$churned_within_60_days)
+confuse
+```
+
+The rows contain predicted negatives and positives, and the columns contain actual negatives and positives. Let's calculate precision and recall.
+
+```{r}
+# Calculate precision
+precision <- confuse[2, 2] / sum(confuse[2, ])
+precision
+```
+
+Around 34% of the subscriptions we predicted to churn actually did churn in the testing set.
+
+```{r}
+# Calculate recall
+recall <- confuse[2, 2] / sum(confuse[, 2])
+recall
+```
+
+We capture around 59% of the true churn cases in the testing set.
+
+```{r}
+# Calculate enrichment
+enrich <- precision / mean(as.numeric(testing$churned_within_60_days))
+enrich
+```
+
+The ratio of the classifier precision to the average rate of positives is 1.51. The subscriptions that we predict to churn end up churning at a rate over 50% higher than the overall population. :) 
+
+Let's calculate the AUCs
+
+```{r}
+# Calculate AUC on training set
+print(calcAUC(training$pred, training[, outcome]))
+
+# Calculate AUC on testing set
+print(calcAUC(testing$pred, testing[, outcome]))
+```
+
+This is slightly better than the decision tree model. Let's look at which features were most important to the model.
+
+```{r}
+# Summarise the model
+summary(glm_model)
+```
+
+The number of helpscout conversations significantly increased the log odds of churning. The number of days active (out of the first 60 days) was also a significant predictor with a negative relationship. The number of team members was also a significant predictor.
+
+Let's see now how a random forest model will do.
+
+## Random forests
+
+```{r warning = F, message = F}
+# Load library
+library(randomForest)
+
+# Define the features
+features <- c('account_age', 'helpscout_convos', 'days_active','team_members',
+              'updates_per_profile','referred_by_marketing', 'visited_before_joining', 'plan')
+
+
+# Train the model
+fmodel <- randomForest(x = training[, features], y = as.factor(training$churned_within_60_days),
+                       ntree = 500, nodesize = 10, importance = T)
+```
+
+Let's look at how important each variable was to the random forest model.
+
+```{r}
+# Plot variable importance
+varImpPlot(fmodel, type = 1)
+```
+
+Interesting to see that! Now let's calculate AUC and assess the accuracy of the model. 
+
+```{r}
+# Calculate AUC on training set
+print(calcAUC(predict(fmodel, newdata = training[, features], type = 'prob')[, '1'],
+      training[, outcome]))
+
+# Calculate AUC on testing set
+print(calcAUC(predict(fmodel, newdata = testing[, features], type = 'prob')[, '1'],
+      testing[, outcome]))
+```
+
+That's the best yet! Let's look at the confusion matrices.
+
+```{r}
+# Training data
+table(churned = training$churned_within_60_days == 1, 
+      pred = predict(fmodel, newdata = training[, features], type = 'prob')[, '1'] > .25)
+```
+
+```{r}
+# Testing data
+table(churned = testing$churned_within_60_days == 1, 
+      pred = predict(fmodel, newdata = testing[, features], type = 'prob')[, '1'] > .25)
+```
+
+Perhaps not as great as we would have hoped! 
