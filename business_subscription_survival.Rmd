@@ -7,7 +7,7 @@ output: github_document
 The purpose of this analysis is to explore Buffer for Business subscriptions to determine how many of them churn after a certain time period. We will visualize the distribution of the length of the subscriptions and run a Kaplan-Meier analysis to determine the percentage of subscriptions that churn X months after beginning.
 
 ```{r setup, include = F}
-library(buffer); library(dplyr); library(ggplot2); library(survival)
+library(buffer); library(dplyr); library(ggplot2); library(survival); library(survminer)
 ```
 
 ## TL;DR
@@ -75,9 +75,6 @@ Alright! Let's summarize and plot the model.
 
 ```{r warning = F, message = F}
 # Create survival plot
-library(survminer)
-
-# Visualize with survminer
 ggsurvplot(fit, data = subs, risk.table = "percentage", risk.table.title = "Percent Remaining",
            break.x.by = 60, xlim = c(0, 365))
 ```

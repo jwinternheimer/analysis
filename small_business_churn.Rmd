@@ -1,0 +1,189 @@
+---
+title: "Small Business Churn Analysis"
+output: github_document
+---
+
+## Motivation
+The goal of this analysis is to predict the probability of a given subscription churning _on a given day_. This is a continuation of the [**subscription churn**](https://github.com/jwinternheimer/analysis/blob/master/Subscription_Churn.md) analysis done for all subscriptions created in 2016. 
+
+We will use a similar approach in this analysis, looking at the same features and using the same methods, including decision trees, logistic regression, and random forests.
+
+```{r setup, include = FALSE}
+# Load libraries
+library(buffer); library(dplyr); library(ggplot2); library(tidyr)
+```
+
+## Data collection
+Let's grab the subscriptions data from Looker using the `buffer` package.
+
+```{r}
+# Get the data from Looker
+subs <- get_look(3861)
+```
+
+```{r include = FALSE}
+# Rename columns
+colnames(subs) <- c('user_id', 'user_joined_at', 'team_members', 'profiles', 
+                    'created_at', 'canceled_at', 'id', 'status', 'plan', 'billing_cycle', 
+                    'amount', 'days_to_activate', 'country', 'referred_by_marketing', 
+                    'visited_before_joining', 'charges', 'nps_responses', 'nps_score',
+                    'helpscout_convos')
+
+# Set dates as date objects
+subs$user_joined_at <- as.Date(subs$user_joined_at, "%Y-%m-%d")
+subs$created_at <- as.Date(subs$created_at, "%Y-%m-%d")
+subs$canceled_at <- as.Date(subs$canceled_at, "%Y-%m-%d")
+
+# Set NPS score as a factor
+subs$nps_score <- as.factor(subs$nps_score)
+
+# Set id as character type
+subs$id <- as.character(subs$id)
+subs$user_id <- as.character(subs$user_id)
+```
+
+We only want to look at subscriptions with the plan `business_v2_small_monthly` in this analysis, so let's filter the rest of the subscriptions out.
+
+```{r}
+# Filter out plans
+small <- subs %>%
+  filter(plan == 'business_v2_small_monthly')
+```
+
+Great, now we have 2756 small business v2 subscriptions to work with. Let's look at how many of them have churned.
+
+```{r}
+# Calculate subscription length
+small <- small %>%
+  mutate(length = as.numeric(canceled_at - created_at),
+         churned = ifelse(is.na(canceled_at), 0, 1)) %>%
+  mutate(churned_90_days = ifelse((length <= 90 & !(is.na(length))), 1, 0))
+
+# See how many churned
+small %>%
+  group_by(churned) %>%
+  summarise(subs = n_distinct(id)) %>%
+  mutate(percent = subs / sum(subs))
+```
+
+Around 55% of these subscriptions churned. Now, let's gather the updates that these users sent **_each week after their subscription began_**. We'll do this using SQL.
+
+```{r include = FALSE}
+con <- redshift_connect()
+```
+
+```{sql eval = FALSE}
+select 
+  subscriptions.id
+  , users.user_id 
+  , date_trunc('week', updates.date) as week
+  , count(distinct updates.id) as updates_count
+from updates
+left join users 
+  on updates.user_id = users.user_id
+left join stripe._subscriptions as subscriptions
+  on users.billing_stripe_id = subscriptions.customer
+where date(subscriptions.start) >= '2016-01-01'
+and subscriptions.plan_id = 'business_v2_small_monthly'
+and updates.status != 'service'
+and updates.date >= subscriptions.start
+and updates.date <= (subscriptions.start + 90)
+group by 1, 2, 3
+```
+
+```{r include = FALSE}
+# Save updates object
+# save(updates, file = "~/business_updates.Rda")
+
+# Load updates object
+load('~/business_updates.Rda')
+```
+
+We also would like to look at the number of days that these users took an action in a given week.
+
+```{sql eval = FALSE}
+select 
+  subscriptions.id
+  , users.user_id 
+  , date_trunc('week', actions_taken.date) as activity_week
+  , count(distinct date(actions_taken.date)) as days_active
+from actions_taken
+left join users 
+  on actions_taken.user_id = users.user_id
+left join stripe._subscriptions as subscriptions
+  on users.billing_stripe_id = subscriptions.customer
+where date(subscriptions.start) >= '2016-01-01'
+and subscriptions.plan_id = 'business_v2_small_monthly'
+and actions_taken.date >= subscriptions.start
+and actions_taken.date <= (subscriptions.start + 90)
+group by 1, 2, 3
+```
+
+```{r include = FALSE}
+# Save activity object
+# save(activity, file = "~/business_activity.Rda")
+
+# Load activity object
+load('~/business_activity.Rda')
+```
+
+We can do the same with Helpscout conversations, but right now I'm not sure how to get the `user_id` and let's keep it simple for now.
+
+## Data tidying
+Let's start with a sequence of weeks.
+
+```{r}
+# Define function to set first day of week as Sunday
+start_of_week <- function(date) {
+  date - (setNames(c(6,0:5),0:6) [strftime(date,'%w')])
+}
+
+# Get a sequence of weeks
+weeks <- seq(from = as.Date("2016-03-14"), to = Sys.Date(), by = "week")
+
+# Make a dataframe
+weeks <- as.data.frame(weeks) %>%
+  mutate(week = start_of_week(weeks)) %>%
+  select(-weeks)
+```
+
+We need to join the subscription data to the updates and activity datasets. 
+
+```{r}
+# Set as date object
+updates$week <- as.Date(updates$week)
+activity$activity_week <- as.Date(activity$activity_week)
+
+# Join updates and activity
+bus <- updates %>%
+  right_join(weeks, by = "week") %>%
+  full_join(activity, by = c("week" = "activity_week", "user_id" = "user_id", "id" = "id")) %>%
+  left_join(select(small, c(1, 6, 7)), 
+                   by = c("user_id" = "user_id", "id" = "id"))
+```
+
+Calculate churn week.
+
+```{r}
+# Churn week
+bus <- bus %>% 
+  mutate(churn_week = start_of_week(canceled_at)) %>%
+  mutate(canceled_this_week = churn_week == week)
+```
+
+
+
+```{r}
+# Determine if subscription churned that week
+bus <- bus %>%
+  mutate(churned_this_week = ifelse(week != churn_week | is.na(churn_week), 0, 1))
+```
+
+Let's also only look at the columns we need.
+
+```{r}
+# Select columns
+bus <- bus %>%
+  select(id:updates_count, created_at, canceled_at, churned:churn_week)
+```
+
