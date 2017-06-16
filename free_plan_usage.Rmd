@@ -1,0 +1,266 @@
+---
+title: "Free Plan Usage"
+output: github_document
+---
+
+## Motivation
+The purpose of this analysis is to get a better understanding of how users on the Individual plan use Buffer, in order to better inform decisions around the plan limits.
+
+### How often do active users post?
+To answer this question, we'll need to gather users, their join date, their last update date (if it was in the past 28 days, they are _currently_ active), and the number of updates they have shared with Buffer
+
+```{r include = FALSE}
+library(buffer); library(dplyr); library(ggplot2)
+```
+
+We'll use the data in [this look](https://looker.buffer.com/looks/3919) to inform our analysis.
+
+```{r}
+# Get users from look
+users <- get_look(3919)
+```
+
+Cool, there are 243k individual users that have shared at least one Buffer update in the past 28 days. Let's visualize the number of updates per day for each of them.
+
+```{r include = FALSE}
+# Rename columns
+colnames(users) <- c('user_id', 'created_at', 'updates', 'days')
+
+# Set dates as date objects
+users$created_at <- as.Date(users$created_at)
+
+# Calculate days since joined
+users <- users %>%
+  mutate(days_since_join = as.numeric(Sys.Date() - created_at))
+
+# Calculate updates per day
+users <- users %>%
+  mutate(updates_per_day = updates / days_since_join,
+         updates_per_update_day = updates / days)
+```
+
+```{r echo = FALSE}
+ggplot(users, aes(x = updates_per_day)) + 
+  geom_density() +
+  scale_x_continuous(limits = c(0, 100))
+```
+
+So most users post very few times per day, but a very small number of users post many times per day. Let's break it down into buckets.
+
+```{r echo = FALSE}
+users <- users %>%
+  mutate(updates_rounded = round(updates_per_day, 0))
+
+# Group by updates
+by_updates <- users %>%
+  group_by(updates_rounded) %>%
+  summarise(users = n_distinct(user_id))
+
+ggplot(filter(by_updates, updates_rounded <= 10), aes(x = as.factor(updates_rounded), y = users)) +
+  geom_bar(stat = 'identity') +
+  labs(x = 'Updates Per Day', y = 'Users')
+```
+
+
+### How many profiles do users have?
+We'll use the data in [this look](https://looker.buffer.com/looks/3920) to answer this question. :) 
+
+```{r}
+profiles <- get_look(3920)
+```
+
+```{r include = FALSE}
+colnames(profiles) <- c('user_id', 'profiles')
+```
+
+Let's summarize the profiles.
+
+```{r}
+summary(profiles$profiles)
+```
+
+Let's plot out the distribution.
+
+```{r}
+by_profile <- profiles %>%
+  group_by(profiles) %>%
+  summarise(users = n_distinct(user_id))
+
+ggplot(by_profile, aes(x = as.factor(profiles), y = users)) +
+  geom_bar(stat = 'identity') +
+  labs(x = 'Number of Profiles', y = 'Users')
+```
+
+### How many users used share next in the past month.
+Let's get these users with a SQL query.
+
+```{r include = FALSE}
+con <- redshift_connect()
+```
+
+```{sql connection=con, output.var=shared_next}
+select
+  a.user_id
+  , count(a.*)
+from actions_taken as a
+left join users 
+  on a.user_id = users.user_id
+where a.full_scope like '%later next%'
+and users.billing_plan = 'individual'
+and a.date > (current_date - 30)
+group by 1
+```
+
+Now let's join it into our original users
+
+```{r}
+# Join action counts
+users <- users %>%
+  left_join(shared_next, by = 'user_id')
+
+# Replace NA's with 0s
+users$count[is.na(users$count)] <- 0
+
+# Indicate if they have used it
+users <- users %>%
+  mutate(has_shared_next = ifelse(count > 0, 'yes', 'no'))
+```
+
+Now let's see how many users and what percentage have shared next in the past 30 days.
+
+```{r}
+users %>%
+  group_by(has_shared_next) %>%
+  summarise(users = n_distinct(user_id)) %>%
+  mutate(proportion = users/sum(users))
+```
+
+### Past 3 months?
+We'll take the exact same approach, but adjust our query to look at users' actions in the past 90 days.
+
+```{sql connection=con, output.var=shared_next}
+select
+  a.user_id
+  , count(a.*)
+from actions_taken as a
+left join users 
+  on a.user_id = users.user_id
+where a.full_scope like '%later next%'
+and users.billing_plan = 'individual'
+and a.date > (current_date - 90)
+group by 1
+```
+
+Now let's join it into our original users
+
+```{r}
+# Drop previous action count column
+users$count <- NULL
+
+# Join action counts
+users <- users %>%
+  left_join(shared_next, by = 'user_id')
+
+# Replace NA's with 0s
+users$count[is.na(users$count)] <- 0
+
+# Indicate if they have used it
+users <- users %>%
+  mutate(has_shared_next = ifelse(count > 0, 'yes', 'no'))
+```
+
+Now let's see how many users and what percentage have shared next in the past 90 days.
+
+```{r}
+users %>%
+  group_by(has_shared_next) %>%
+  summarise(users = n_distinct(user_id)) %>%
+  mutate(proportion = users/sum(users))
+```
+
+### How many users used a custom schedule in the past month.
+Let's get these users with a SQL query.
+
+```{r include = FALSE}
+con <- redshift_connect()
+```
+
+```{sql connection=con, output.var=custom}
+select
+  a.user_id
+  , count(a.*)
+from actions_taken as a
+left join users 
+  on a.user_id = users.user_id
+where a.full_scope like '%composer schedule%'
+and users.billing_plan = 'individual'
+and a.date > (current_date - 30)
+group by 1
+```
+
+Now let's join it into our original users
+
+```{r}
+users$count <- NULL
+
+# Join action counts
+users <- users %>%
+  left_join(custom, by = 'user_id')
+
+# Replace NA's with 0s
+users$count[is.na(users$count)] <- 0
+
+# Indicate if they have used it
+users <- users %>%
+  mutate(has_custom = ifelse(count > 0, 'yes', 'no'))
+```
+
+Now let's see how many users and what percentage have shared next in the past 30 days.
+
+```{r}
+users %>%
+  group_by(has_custom) %>%
+  summarise(users = n_distinct(user_id)) %>%
+  mutate(proportion = users/sum(users))
+```
+
+### Past 3 months
+
+```{sql connection=con, output.var=custom}
+select
+  a.user_id
+  , count(a.*)
+from actions_taken as a
+left join users 
+  on a.user_id = users.user_id
+where a.full_scope like '%composer schedule%'
+and users.billing_plan = 'individual'
+and a.date > (current_date - 90)
+group by 1
+```
+
+Now let's join it into our original users
+
+```{r}
+users$count <- NULL
+
+# Join action counts
+users <- users %>%
+  left_join(custom, by = 'user_id')
+
+# Replace NA's with 0s
+users$count[is.na(users$count)] <- 0
+
+# Indicate if they have used it
+users <- users %>%
+  mutate(has_custom = ifelse(count > 0, 'yes', 'no'))
+```
+
+Now let's see how many users and what percentage have shared next in the past 30 days.
+
+```{r}
+users %>%
+  group_by(has_custom) %>%
+  summarise(users = n_distinct(user_id)) %>%
+  mutate(proportion = users/sum(users))
+```
