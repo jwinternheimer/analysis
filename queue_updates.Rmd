@@ -20,15 +20,17 @@ library(dplyr); library(buffer); library(ggplot2)
 con <- redshift_connect()
 ```
 
-```{sql connection=con, eval=FALSE}
+```{sql connection=con, output.var=updates}
 select
-  user_id
-  , full_scope
-  , count(distinct id)
-from actions_taken
-where full_scope like '%updates shared%'
-and date > (current_date - 7)
-group by user_id, full_scope
+  a.user_id
+  , a.full_scope
+  , count(distinct a.id)
+from actions_taken as a
+inner join users
+  on a.user_id = users.user_id
+where full_scope like '%shared now%'
+and date > (current_date - 29)
+group by a.user_id, a.full_scope
 ```
 
 ```{r}
@@ -153,7 +155,13 @@ queue_plot <- ggplot(filter(proportions, type == 'queue'), aes(x = proportion)) 
   theme(axis.text.y=element_blank(), axis.ticks.y=element_blank()) +
   labs(x = 'Proportion of Updates Sent to Queue')
 
-grid.arrange(custom_plot, queue_plot, nrow = 2)
+# Now plot
+now_plot <- ggplot(filter(proportions, type == 'now'), aes(x = proportion)) + 
+  geom_density() + 
+  theme(axis.text.y=element_blank(), axis.ticks.y=element_blank()) +
+  labs(x = 'Proportion of Updates Shared Now')
+
+grid.arrange(custom_plot, queue_plot, now_plot, nrow = 2)
 ```
 
 Interesting, for both custom-scheduled posts and posts sent to the queue, users either did it a lot, or not very much. For custom-scheduled posts, most users only custom scheduled for a very small percentage of updates. However, some users sent a very high proportion of posts via a custom schedule.

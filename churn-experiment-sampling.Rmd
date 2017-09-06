@@ -1,0 +1,290 @@
+---
+title: "Business Churn Experiment"
+output: github_document
+---
+
+Based on the experiment detailed in [this Paper](https://paper.dropbox.com/doc/RFC-Business-Churn-Experiment-3eyS6y4SpB7wBd1UCFVu3), we need to gather a sample of users that are "at risk" of churning in the coming weeks. We'll use the same approach taken in [this blog post](https://jwinternheimer.github.io/blog/churn-prediction/) to find Business customers that are at risk.
+
+## Data collection
+We'll begin by querying Redshift for active Business subscriptions. The following SQL query returns the number of updates that every Business customer has scheduled in each week that he or she scheduled any updates. 
+
+```{r include = FALSE}
+# load libraries
+library(buffer); library(dplyr); library(tidyr); library(ggplot2); library(lubridate)
+library(broom); library(purrr)
+```
+
+```{r include = FALSE, warning = FALSE, message = FALSE}
+# connect to redshift
+con <- redshift_connect()
+```
+
+```{sql eval = FALSE}
+select
+  up.user_id
+  , date_trunc('week', u.created_at) as user_created_at
+  , date_trunc('week', up.date) as update_week
+  , count(distinct up.id) as update_count
+from updates as up
+left join profiles as p
+  on p.profile_id = up.profile_id
+left join users as u
+  on p.user_id = u.user_id
+where up.date >= (current_date - 180)
+  and up.status <> 'service'
+  and u.billing_plan != 'individual'
+  and u.billing_plan != 'awesome'
+  and u.billing_plan != 'new_awesome'
+  and u.billing_plan != '1'
+  and u.billing_plan is not null
+group by 1, 2, 3
+```
+
+```{r include = FALSE}
+# save updates data
+# saveRDS(updates, file = 'users.rds')
+
+# load updates data
+updates <- readRDS('users.rds')
+```
+
+Users that are on Buffer for Business trials are considered to be Business users in this query, so we'll want to filter this dataset to include only business users that have at least one successful charge _for a business subscription_. The following query will give us the number of successful charges for each user, as well as the most recent `subscription_id`.
+
+```{sql eval = FALSE}
+ -- get most recent charge ID for each customer
+with recent_charges as (
+	select
+		*
+		, last_value(id) over(partition by customer order by created rows between unbounded preceding and unbounded following) as last_charge
+	from stripe._charges
+	where captured = TRUE
+	), 
+	
+-- get data from only last successful charge
+last_charge as ( 
+  select 
+		*
+	from recent_charges
+	where last_charge = id
+) 
+
+-- get info on the last subscription with a successful charge
+select
+	c.created
+	, c.id as charge_id
+	, c.invoice
+	, c.customer as customer_id
+	, u.user_id
+	, c.captured
+	, i.subscription_id
+	, s.*
+	, p.interval
+from last_charge as c
+left join users as u
+  on u.billing_stripe_id = c.customer
+left join stripe._invoices as i
+	on c.invoice = i.id
+left join stripe._subscriptions as s
+	on i.subscription_id = s.id
+left join stripe._plans as p
+  on s.plan_id = p.id
+where c.created >= (current_date - 365)
+  and s.status = 'active'
+  and lower(s.plan_id) not like '%awesome%'
+  and lower(s.plan_id) not like '%pro%'
+  and lower(s.plan_id) not like '%respond%'
+  and lower(s.plan_id) not like '%studio%'
+  and lower(s.plan_id) not like '%lite%'
+  and lower(s.plan_id) not like '%solo%'
+  and lower(s.plan_id) not like '%plus%'
+  and lower(s.plan_id) != 'small-29'
+  and lower(s.plan_id) != 'small-149'
+```
+
+```{r include = FALSE}
+# save charges data
+# saveRDS(charges, file = 'charges.rds')
+
+# load charges data
+charges <- readRDS('charges.rds')
+```
+
+Now we join the two datasets with an `inner_join`, so that only users with successful charges are included.
+
+```{r}
+# join charges and updates data
+users <- updates %>%
+  inner_join(charges, by = 'user_id')
+
+# set dates as dates
+users$user_created_at <- as.Date(users$user_created_at, format = '%Y-%m-%d')
+users$update_week <- as.Date(users$update_week, format = '%Y-%m-%d')
+
+# remove unneeded datasets
+rm(updates); rm(charges)
+```
+
+## Data tidying
+Now we have an interesting problem. We have the number of updates that each Business customer send in weeks that he or she schedule any updates, but we don't have any information on the weeks in which they didn't sschdule any updates. We need to fill the dataset so that each user has a value for each week, even if it's zero.
+
+Luckily for us, the `complete()` function in the `tidyr` package is made for exactly that purpose. We will add a couple more filters, to exclude the current week (which is not yet over) and to exclude weeks that came before the user signed up for Buffer
+
+```{r}
+# complete the data frame
+users_complete <- users %>%
+  filter(update_week != max(users$update_week)) %>%
+  complete(user_id, update_week, fill = list(update_count = 0)) %>%
+  select(user_id, update_week, update_count) %>%
+  left_join(select(users, c(user_id, user_created_at)), by = 'user_id') %>%
+  filter(update_week >= user_created_at)
+```
+
+Great, now we have a tidy data frame that contains the number of updates that each Business customer sent each week. In order to calculate the rate at which users' usage is changing over time, we'll need a bit more information. First, we add columns to the data frame for the total number updates scheduled by each person. We can then `filter()` to only keep users that have scheduled updates in at least 3 separate weeks.
+
+We will also add a column for the total number of updates scheduled by each user.
+
+```{r}
+# get year value
+users_complete <- users_complete %>%
+  mutate(year = year(update_week) + yday(update_week) / 365)
+
+# get the overall update totals and number of weeksfor each user
+update_totals <- users_complete %>%
+  group_by(user_id) %>%
+  summarize(update_total = sum(update_count), 
+            number_of_weeks = n_distinct(update_week[update_count > 0])) %>%
+  filter(number_of_weeks >= 3)
+
+# count the updates by week
+update_week_counts <- users_complete %>% 
+  inner_join(update_totals, by = 'user_id') %>%
+  filter(update_week != max(users$update_week))
+
+update_week_counts
+```
+
+## Using general linear models
+We can think about this modeling technique answering questions like: "did a given user schedule any updates in a given week? Yes or no? How does the count of updates depend on time?"
+
+The specific technique we'll use is this:
+  
+  - Use the `nest()` function to make a data frame with a list column that contains little miniature data frames for each user.
+  
+  - Use the `map()` function to apply our modeling procedure to each of those little data frames inside our big data frame.
+  
+  - This is count data so let’s use `glm()` with `family = "binomial"` for modeling.
+  
+  - We'll pull out the slopes and p-values from each of these models. We are comparing many slopes here and some of them are not statistically significant, so let’s apply an adjustment to the p-values for multiple comparisons. 
+
+Now let's fit the models.
+  
+```{r warning = FALSE, message = FALSE}
+# create logistic regression model
+mod <- ~ glm(cbind(update_count, update_total) ~ year, ., family = "binomial")
+
+# calculate growth rates for each user (this might take a while)
+slopes <- update_week_counts %>%
+  nest(-user_id) %>%
+  mutate(model = map(data, mod)) %>%
+  unnest(map(model, tidy)) %>%
+  filter(term == "year") %>%
+  arrange(desc(estimate))
+
+# show a sample of the results
+slopes %>% arrange(estimate)
+```
+
+We're finding out how influential the "time" factor is to the number of updates scheudled over time. If the slope is negative and large in magnitude, it suggests that update counts decrease significantly over time. Let's plot the 12 users with the largest _negative_ model estimates.
+
+```{r echo = FALSE}
+slopes %>%
+  filter(p.value < 0.05) %>%
+  arrange(estimate) %>%
+  head(12) %>%
+  inner_join(users_complete, by = "user_id") %>%
+  mutate(user_id = reorder(user_id, -estimate)) %>%
+  filter(update_week != max(users$update_week)) %>%
+  ggplot(aes(x = update_week, y = update_count, color = user_id)) +
+  geom_line(show.legend = FALSE) +
+  geom_point(show.legend = FALSE) +
+  facet_wrap(~ user_id, scales = "free_y") +
+  expand_limits(y = 0) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(x = NULL, y = NULL, title = "User Updates")
+```
+
+We can see that these users' usage has decreased quite dramatically. Users like this will make up the base of the sample in our expeirment. Based on data we have already collected, we can expect users with a slope estimate less than or equal to -5 to churn at a rate of around 5-6%. 
+
+Let's gather this sample of users and define out `control` and `treatment` groups.
+
+```{r}
+# get user and subscription attributes
+user_facts <- users %>%
+  select(user_id, charge_id:interval) %>%
+  unique()
+
+# join user facts to slopes
+slopes <- slopes %>%
+  left_join(user_facts, by = 'user_id')
+
+# get entire sample
+sample <- slopes %>%
+  filter(p.value < 0.05 & estimate <= -7)
+
+# assign control group
+control_group <- sample %>%
+  sample_frac(size = 0.5)
+
+# assign treatment group
+treatment_group <- sample %>%
+  anti_join(control_group, by = 'user_id')
+
+# save both groups
+saveRDS(treatment_group, file = 'treatment_group.rds')
+saveRDS(control_group, file = 'control_group.rds')
+```
+
+There we have it! Our control group has 244 users and our treatment group has 243. Let's take a look at a sample of users from the treatment group.
+
+```{r echo = FALSE}
+treatment_group %>%
+  filter(p.value < 0.05) %>%
+  arrange(estimate) %>%
+  head(12) %>%
+  inner_join(users_complete, by = "user_id") %>%
+  mutate(user_id = reorder(user_id, -estimate)) %>%
+  filter(update_week != max(users$update_week)) %>%
+  ggplot(aes(x = update_week, y = update_count, color = user_id)) +
+  geom_line(show.legend = FALSE) +
+  geom_point(show.legend = FALSE) +
+  facet_wrap(~ user_id, scales = "free_y") +
+  expand_limits(y = 0) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(x = NULL, y = NULL, title = "Treatment Group")
+```
+
+This is what the data for these 12 users will look like.
+
+```{r}
+treatment_group %>%
+  filter(p.value < 0.05) %>%
+  arrange(estimate) %>%
+  head(12)
+```
+
+And here is an example of a single user's usage pattern.
+
+```{r echo = FALSE}
+users_complete %>% 
+  filter(user_id == '593e6533840f273826cefb5a') %>%
+  ggplot(aes(x = update_week, y = update_count, color = user_id)) +
+  geom_line(show.legend = FALSE) +
+  geom_point(show.legend = FALSE) +
+  facet_wrap(~ user_id, scales = "free_y") +
+  expand_limits(y = 0) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(x = NULL, y = NULL, title = "User Updates")
+```
+
+I'll manually email a sample of users in the treatment group and compare their churn rates to the churn rates of the control group. 
+

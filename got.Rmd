@@ -1,0 +1,369 @@
+---
+title: "Game of Thrones Book Analysis"
+output: github_document
+---
+
+Winter is here. Season 7 of Game of Thrones is out, so we thought it would be an opportune time to do a fun text analysis of the first book in the series that the show is based on, "A Game of Thrones".
+
+Much of this analysis is done with the `tidytext` R package and is based on analyses that Julia S and David Robinson have already one.
+
+## Data collection
+To get the data into R, we'll read in a text file with the `readLines()` function and convert it into a data frame.
+
+```{r warning = FALSE, message = FALSE, include = FALSE}
+library(tidytext); library(dplyr); library(ggplot2)
+```
+
+```{r}
+df <- tibble()
+
+# Read data
+for (i in 1:5) {
+  
+  # Read text files
+  assign(paste0("book", i), readLines(paste0("got", i, ".txt")))
+  
+  # Create dataframes
+  assign(paste0("book", i), tibble(get(paste0("book", i))))
+  
+  # Set the book number
+  df <- rbind(df, get(paste0("book", i)))
+
+}
+
+```
+
+Now that we have the text of the books in a single dataframe, we need to remove lines in which there is no text.
+
+```{r}
+# Column names
+colnames(df) <- 'text'
+
+# Remove rows that are empty
+df <- df %>% filter(text != "")
+```
+
+## Tidy the text
+To get this data in a tidy format, we need each value to have its own row. We can use the `unnest_tokens()` function to do this for us.
+
+```{r}
+# Unnest the tokens
+text_df <- df %>%
+  unnest_tokens(word, text)
+```
+
+Nice! Now we want to remove words like "a" and "the" that appear frequently but don't provide much value. We'll remove these stop words by "anti-joining" them with our tidy data frame, thus making sure that all stop words are excluded.
+
+```{r}
+# Get stop words
+data(stop_words)
+
+# Anti join stop words
+text_df <- text_df %>%
+  anti_join(stop_words, by = "word")
+```
+
+Now we can list and visualize the most frequently occuring words in the series.
+
+```{r echo = FALSE}
+# Plot most common words
+text_df %>%
+  count(word, sort = TRUE) %>%
+  filter(n > 1500) %>%
+  mutate(word = reorder(word, n)) %>%
+  ggplot(aes(word, n)) +
+  geom_col() +
+  labs(x = '', y = '', title = 'Most Common Words') +
+  theme_minimal() +
+  coord_flip()
+```
+
+At first glance we can see that titles like "lord", "ser", and "king", and names occur most frequently. We don't have a good understanding of the context in which these words occur however. One way we can address this is by finding and analyzing _n-grams_.
+
+## N-grams
+An n-gram is a contiguous series of n words from a text; for example, a bigram is a pair of words, with n=2. We will use the `unnest_tokens` function from the `tidytext` package to identify all the bigrams in the 5 Game of Thrones book and transform them into a tidy dataset.
+
+```{r}
+# Get bigrams
+got_bigrams <- df %>%
+  unnest_tokens(bigram, text, token = "ngrams", n = 2)
+```
+
+Now that we have our n-gram, we can visualize the most popular ones.
+
+```{r echo = FALSE}
+got_bigrams %>%
+  count(bigram, sort = TRUE) %>%
+  filter(n > 1500) %>%
+  mutate(bigram = reorder(bigram, n)) %>%
+  ggplot(aes(bigram, n)) +
+  geom_col() +
+  labs(x = '', y = '', title = 'Most Common Bigrams') +
+  theme_minimal() +
+  coord_flip()
+```
+
+Oops, this list is full of stopwords! We can remove them by separating the two words in the bigram, removing stopwords, and reuniting the bigrams.
+
+```{r}
+library(tidyr)
+
+# Separate the two words
+bigrams_separated <- got_bigrams %>%
+  separate(bigram, c("word1", "word2"), sep = " ")
+
+# Filter out stopwords
+bigrams_filtered <- bigrams_separated %>%
+  filter(!word1 %in% stop_words$word) %>%
+  filter(!word2 %in% stop_words$word)
+
+# Count the new bigrams
+bigram_counts <- bigrams_filtered %>% 
+  count(word1, word2, sort = TRUE)
+
+# Unite the bigrams to form words
+bigrams_united <- bigrams_filtered %>%
+  unite(bigram, word1, word2, sep = " ")
+```
+
+Now we can plot the most common bigrams, excluding stopwords.
+
+```{r echo = FALSE}
+# Visualize most popular bigrams
+bigrams_united %>%
+  count(bigram, sort = TRUE) %>%
+  filter(n > 150) %>%
+  mutate(bigram = reorder(bigram, n)) %>%
+  ggplot(aes(bigram, n)) +
+  geom_col() +
+  labs(x = NULL, y = NULL) +
+  theme_minimal() +
+  coord_flip()
+```
+
+Most of these bigrams are titles or names, which makes sense! 
+
+### Gendered verbs
+[This study](http://culturalanalytics.org/2016/12/understanding-gender-and-character-agency-in-the-19th-century-novel/) by Matthew Jockers and Gabi Kirilloff utilizes text mining to examine 19th century novels and explore how gendered pronouns like he/she/him/her are associated with different verbs. 
+
+These researchers used the Stanford CoreNLP library to parse dependencies in sentences and find which verbs are connected to which pronouns, but we can also use a [tidytext approach](https://juliasilge.com/blog/gender-pronouns/) to find the most commonly-occuring verbs that appear after these gendered pronouns. The two pronouns we'll examine here are "he" and "she".
+
+Let's find "gendered" bigrams by finding all bigrams in which the first word is "he" or "she".
+
+```{r}
+# Define our pronouns
+pronouns <- c("he", "she")
+
+# Get our bigram where first word is a pronoun
+gender_bigrams <- got_bigrams %>%
+    count(bigram, sort = TRUE) %>%
+    separate(bigram, c("word1", "word2"), sep = " ") %>%
+    filter(word1 %in% pronouns) %>%
+    count(word1, word2, wt = n, sort = TRUE) %>%
+    rename(total = nn)
+```
+
+Now let's visualize the most common gendered bigrams.
+
+```{r echo = FALSE}
+gender_bigrams %>%
+  unite(bigram, word1, word2, sep = " ") %>%
+  filter(total > 300) %>%
+  mutate(bigram = reorder(bigram, total)) %>%
+  ggplot(aes(bigram, total)) +
+  geom_col() +
+  labs(x = NULL, y = NULL) +
+  theme_minimal() +
+  coord_flip()
+```
+
+These are the most common bigrams that start with “he” and “she” in the Game of Thrones series. The most common bigrams are similar between the male and female characters in these books
+
+We can use a log odds ratio so we can find the words that exhibit the biggest differences between relative use for “she” and “he”.
+
+```{r}
+# Calculate log odds ratio
+word_ratios <- gender_bigrams %>%
+    group_by(word2) %>%
+    filter(sum(total) > 50) %>%
+    ungroup() %>%
+    spread(word1, total, fill = 0) %>%
+    mutate_if(is.numeric, funs((. + 1) / sum(. + 1))) %>%
+    mutate(logratio = log2(she / he)) %>%
+    arrange(desc(logratio))    
+```
+
+So which words have about the same likelihood of following “he” or “she” in the first Thrones book?
+
+```{r}
+# Arrange by logratio
+word_ratios %>% 
+    arrange(abs(logratio))
+```
+
+These words, like "caught", "sat", and "found" are about as likely to come after the word "she" as the word "he". Now let’s look at the words that exhibit the largest differences in appearing after "she" compared to "he".
+
+```{r echo = FALSE}
+word_ratios %>%
+    mutate(abslogratio = abs(logratio)) %>%
+    group_by(direction = ifelse(logratio < 0, 'More "he"', "More 'she'")) %>%
+    top_n(15, abslogratio) %>%
+    ungroup() %>%
+    mutate(word = reorder(word2, logratio)) %>%
+    ggplot(aes(word, logratio, color = direction)) +
+    geom_segment(aes(x = word, xend = word,
+                     y = 0, yend = logratio), 
+                 size = 1.1, alpha = 0.6) +
+    geom_point(size = 3.5) +
+    coord_flip() +
+    theme_minimal() +
+    labs(x = NULL, 
+         y = NULL,
+         title = "Words paired with 'he' and 'she' in Game of Thrones",
+         subtitle = "Women cry, scream, and struggle while men move, lead, and take") +
+    scale_color_discrete(name = "", labels = c("More 'she'", "More 'he'")) +
+    scale_y_continuous(breaks = seq(-3, 3),
+                       labels = c("8X", "4X", "2X", 
+                                  "Same", "2X", "4X", "8X"))
+```
+
+Men are more than twice as likely to fall, die, do, seem, or bring, whereas women are more than twice as likely to whisper, scream, throw, pray, and cry. This doesn't paint a pretty picture of gender roles in the Game of Thrones series. 
+
+More positive, action-oriented verbs like "drew", "shouted", and "can" seem to appear more often for men, while more passive, victim-like verbs like "didn't", "screamed", and "cried" appear more often for women in the series. 
+
+## NLP
+
+```{r warning = FALSE, message = FALSE}
+# Load library
+library(cleanNLP); library(reticulate)
+
+# Setting up NLP backend
+init_spaCy()
+```
+
+```{r}
+# Get GoT text
+text <- paste(book_df$text, collapse = " ")
+```
+
+Because our input is a text string we set as_strings to TRUE (the default is to assume that we are giving the function paths to where the input data sits on the local machine"):
+
+```{r}
+obj <- run_annotators(text, as_strings = TRUE)
+```
+
+Here, we used the spaCy backend.The returned annotation object is nothing more than a list of data frames (and one matrix), similar to a set of tables within a database. The names of these tables are:
+
+```{r include = FALSE}
+names(obj)
+```
+
+The tokens table has one row for each word in the input text, giving data about each word such as its lemmatized form and its part of speech. The token table contains one row for each unique token, usually a word or punctuation mark, in any document in the corpus. Any annotator that produces an output for each token has its results displayed here. These include the lemmatizer, the part of the speech tagger and speaker indicators. The schema is given by:
+
+ - `id`: Id of the source document.
+ - `sid`: Sentence id, starting from 0.
+ - `tid`: Token id, with the root of the sentence starting at 0.
+ - `word`: Raw word in the input text.
+ - `lemma`: Lemmatized form of the word. More on lemmatization [**here**](https://nlp.stanford.edu/IR-book/html/htmledition/stemming-and-lemmatization-1.html).
+ - `upos`: Universal part of speech code.
+ - `pos`: Language-specific part of speech code; uses the Penn Treebank codes.
+ - `cid`: Character offset at the start of the word in the original document.
+
+Let's get our tokens.
+
+```{r}
+tokens <- get_token(obj)
+```
+
+The 12 universal tags are:
+
+ - VERB - verbs (all tenses and modes)
+ - NOUN - nouns (common and proper)
+ - PRON - pronouns 
+ - ADJ - adjectives
+ - ADV - adverbs
+ - ADP - adpositions (prepositions and postpositions)
+ - CONJ - conjunctions
+ - DET - determiners
+ - NUM - cardinal numbers
+ - PRT - particles or other function words
+ - X - other: foreign words, typos, abbreviations
+ - . - punctuation
+
+```{r}
+table(tokens$upos)
+```
+
+### Named entities
+Named entity recognition is the task of finding entities that can be defined by proper names, categorizing them, and standardizing their formats. Let's use this approach to get the names of the main characters in the book.
+
+```{r warning = FALSE, message = FALSE}
+# Find the named entities in our text
+people <- get_entity(obj) %>% 
+  filter(entity_type == "PERSON" & entity != "Hand" & entity != "Father") %>%
+  group_by(entity) %>%
+  count %>%
+  arrange(desc(n))
+
+# Get only the top 19 characters
+main_characters <- people[1:10,]
+
+main_characters
+```
+
+```{r include = FALSE}
+# Set names to lower case
+main_characters$entity <- tolower(main_characters$entity)
+
+# Set the gender of the main characters
+main_characters$gender <- c('male', 'male', 'male', 'male', 'female', 'female', 'female', 'female',
+                            'male', 'male')
+```
+
+### Dependencies
+Dependencies give the grammatical relationship between pairs of tokens within a sentence. As they are at the level of token pairs, they must be represented as a new table.
+
+```{r}
+# Get the dependencies
+dependencies <- get_dependency(obj, get_token = TRUE)
+
+dependencies %>% 
+  filter(lemma_target %in% main_characters$entity & relation == 'nsubj') %>%
+  group_by(lemma_target, word, relation) %>%
+  count %>%
+  arrange(desc(n))
+```
+
+```{r}
+# Calculate td-idf
+book_words <- dependencies %>%
+  filter(lemma_target %in% main_characters$entity & relation == 'nsubj') %>%
+  select(lemma_target, word) %>%
+  group_by(lemma_target, word) %>% 
+  summarise(n = n()) %>%
+  bind_tf_idf(word, lemma_target, n)
+```
+
+```{r message = FALSE, warning = FALSE}
+book_words$lemma_target <- as.factor(book_words$lemma_target)
+
+# Plot td-idf
+book_words %>% 
+  group_by(lemma_target) %>% 
+  top_n(5) %>% 
+  ungroup %>%
+  ggplot(aes(word, tf_idf, fill = lemma_target)) +
+  geom_col(show.legend = FALSE) +
+  labs(x = NULL, y = "tf-idf") +
+  facet_wrap(~ lemma_target, ncol = 2, scales = "free") +
+  coord_flip()
+```
+
+### Coreference
+Coreferences link sets of tokens that refer to the same underlying person, object, or idea. One common example is the linking of a noun in one sentence to a pronoun in the next sentence.
+
+```{r}
+get_coreference(obj)[2,]
+
+```
+

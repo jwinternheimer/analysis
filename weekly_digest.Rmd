@@ -97,7 +97,7 @@ ggplot(by_group, aes(x = as.factor(week_num), y = proportion, fill = group)) +
   geom_bar(stat = 'identity', position = 'dodge') +
   geom_text(aes(label=round(proportion,3)), position=position_dodge(width=0.9), vjust=-0.25) + 
   labs(x = 'Week', y = '', title = 'Reactivation Rate')
-```
+1```
 
 ## Conclusions
 Based on this sample of users from the first two Dormant emails of 2017, the data suggests that the weekly digest does not have a signficant effect on reactivation (defined as scheduling an update through Buffer on or after the week of the digest).
